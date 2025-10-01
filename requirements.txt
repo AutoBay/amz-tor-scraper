@@ -1,3 +1,4 @@
 requests-tor
 beautifulsoup4
 lxml
+fake_headers
