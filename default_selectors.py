@@ -1,4 +1,4 @@
-from typing import  Dict, Any
+from typing import Dict, Any
 
 DEFAULT_SELECTORS: Dict[str, Any] = {
     "navbar": {
@@ -26,6 +26,8 @@ DEFAULT_SELECTORS: Dict[str, Any] = {
         "description": "#feature-bullets",
         "is_on_stock": "#availability",
         "return_policy": "#returnsInfoFeature_feature_div > div.offer-display-feature-text.a-size-small > span > a > span",
+
+        # Tech-spec tables (existing)
         "details_table_rows": (
             "#productDetails_techSpec_section_1 tr, "
             "#productDetails_detailBullets_sections1 tr, "
@@ -34,10 +36,16 @@ DEFAULT_SELECTORS: Dict[str, Any] = {
         ),
         "details_th": "th, td.prodDetSectionEntry",
         "details_td": "td, td.prodDetAttrValue",
+
+        # Detail bullets block (added; matches the HTML you pasted)
+        "detail_bullets_rows": "#detailBullets_feature_div ul.detail-bullet-list > li",
+        "detail_bullets_key": "span.a-list-item > span.a-text-bold",
+        "detail_bullets_val": "span.a-list-item > span:not(.a-text-bold)",
+
         "is_more_deals_on_releated_products": "#sp_detail_thematic-hercules_hybrid_deals_T1",
         "stock_positive_keywords": "in stock|available|ships soon",
 
-        # Pricing selectors (common variants on Amazon product pages)
+        # Pricing selectors
         "price_current": "#corePrice_feature_div .a-price .a-offscreen, #price_inside_buybox, #tp_price_block_total_price_ww",
         "price_original": "#price .a-text-price .a-offscreen, #corePrice_desktop .a-text-price .a-offscreen, #listPriceLegalMessage .a-offscreen",
         "coupon_text": "#couponBadgeRegularArithmetic, #couponTextBucket, #promoPriceBlockMessage_feature_div",

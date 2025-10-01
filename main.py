@@ -1,78 +1,78 @@
 from __future__ import annotations
 
+import os
 import time
 import random
 from typing import List, Dict, Any
 
-from data_models import SearchCard
+from selenium_fetcher import BrowserFetcher
 from amz_scraper import AmzScraper
-from headers_factory import HeaderFactory
+from data_models import SearchCard
 from csv_fns import export_rows_csv
 
 BASE = "https://www.amazon.com"
 
+TOR_BROWSER_PATH = None  # e.g. "/Applications/Tor Browser.app/Contents/MacOS/firefox"
+GECKODRIVER_PATH = None  # e.g. "/opt/homebrew/bin/geckodriver" or "/usr/local/bin/geckodriver"
 
-if __name__ == "__main__":
-    hf = HeaderFactory(browser="chrome", os_name="win", include_misc=True, referer=BASE + "/")
 
-    scraper = AmzScraper(
-        use_tor=False,
-        header_factory=hf.generate,  # pass callable
+def run(seed_url: str, page_limit: int = 10) -> None:
+    fetcher = BrowserFetcher(
+        tor_browser_path=TOR_BROWSER_PATH,
+        geckodriver_path=GECKODRIVER_PATH,
+        headless=False,
+        page_load_timeout=60,
+        per_req_sleep=(1.2, 2.8),
+        warmup=True,
     )
 
-    # seed search
-    search_url = "https://www.amazon.com/s?k=hats&crid=3UD0HZDEGZ2PT&sprefix=ha%2Caps%2C230&ref=nb_sb_noss_2"
+    scraper = AmzScraper(fetcher=fetcher)
 
-    # crawl all result pages up to a sane limit
-    cards: List[SearchCard] = scraper.crawl_search(search_url, page_limit=50,rotate_ip=True)
-    print(f"Collected {len(cards)} cards across pages.")
+    try:
+        cards: List[SearchCard] = scraper.crawl_search(seed_url, page_limit=page_limit, rotate_ip=True)
+        print(f"Collected {len(cards)} cards across pages.")
 
-    # visit products; parse and write CSV
-    rows: List[Dict[str, Any]] = []
-    for idx, c in enumerate(cards, 1):
-        url = c.product_url
-        row = {
-            "title": c.title,
-            "price_current": None,
-            "price_original": None,
-            "discount_percent": None,
-            "discount_source": None,
-            "has_coupon": c.has_coupon,
-            "is_limited_time_deal": c.is_limited_time_deal,
-            "url": url,
-            "product_dimensions": None,
-        }
+        rows: List[Dict[str, Any]] = []
+        for idx, c in enumerate(cards, 1):
+            url = c.product_url
+            row: Dict[str, Any] = {
+                "title": c.title,
+                "price_current": None,
+                "price_original": None,
+                "discount_percent": None,
+                "discount_source": None,
+                "has_coupon": c.has_coupon,
+                "is_limited_time_deal": c.is_limited_time_deal,
+                "url": url,
+                "product_dimensions": None,
+            }
 
-        if not url:
+            if not url:
+                rows.append(row)
+                continue
+
+            try:
+                print(f"[{idx}/{len(cards)}] Fetching product: {url}")
+                html = scraper.fetch(url, rotate_ip=True)
+                details = scraper.parse_product_page(html)
+
+                dims = AmzScraper.get_dimensions_from_kv(details.details_kv or {})
+
+                row.update({
+                    "price_current": details.price_current,
+                    "price_original": details.price_original,
+                    "discount_percent": details.discount_percent,
+                    "discount_source": details.discount_source,
+                    "product_dimensions": dims,
+                })
+            except Exception as e:
+                print(f"Product fetch failed: {e}")
+
             rows.append(row)
-            continue
+            time.sleep(random.uniform(1.5, 3.5))
 
-        try:
-            print(f"[{idx}/{len(cards)}] Fetching product: {url}")
-            html = scraper.fetch(url, rotate_ip=True)
-            details = scraper.parse_product_page(html)
-
-            dims = None
-            if details.details_kv:
-                dims = details.details_kv.get("Product Dimensions") or details.details_kv.get("Package Dimensions")
-
-            row.update({
-                "price_current": details.price_current,
-                "price_original": details.price_original,
-                "discount_percent": details.discount_percent,
-                "discount_source": details.discount_source,
-                "product_dimensions": dims,
-            })
-        except Exception as e:
-            print(f"Product fetch failed: {e}")
-
-        rows.append(row)
-        time.sleep(random.uniform(2.0, 5.0))  # polite pacing
-
-    out_path = "out/products_with_discounts.csv"
-    ordered = []
-    for r in rows:
-        ordered.append({
+        out_path = "out/products_with_discounts.csv"
+        ordered = [{
             "title": r.get("title"),
             "price_current": r.get("price_current"),
             "price_original": r.get("price_original"),
@@ -82,6 +82,14 @@ if __name__ == "__main__":
             "is_limited_time_deal": r.get("is_limited_time_deal"),
             "url": r.get("url"),
             "product_dimensions": r.get("product_dimensions"),
-        })
-    export_rows_csv(out_path, ordered, append=False)
-    print(f"Wrote CSV: {out_path}")
+        } for r in rows]
+        export_rows_csv(out_path, ordered, append=False)
+        print(f"Wrote CSV: {out_path}")
+
+    finally:
+        fetcher.close()
+
+
+if __name__ == "__main__":
+    seed_search_url = "https://www.amazon.com/s?k=hats&ref=nb_sb_noss_2"
+    run(seed_search_url, page_limit=10)

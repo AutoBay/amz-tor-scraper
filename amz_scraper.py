@@ -1,15 +1,13 @@
 from __future__ import annotations
 
 import re
-from typing import List, Optional, Dict, Any, Iterable, Tuple, Callable
+from typing import List, Optional, Dict, Any, Iterable, Tuple
 from urllib.parse import urlparse, parse_qs, unquote, urljoin
 
 from bs4 import BeautifulSoup, Tag
 import default_selectors as DEFAULT_SELECTORS
 
-from robust_fetcher import RobustFetcher
 from data_models import ProductDetails, SearchCard
-from headers_factory import HeaderFactory  # class import
 
 MONEY_RE = re.compile(r"(\d{1,3}(?:[,]\d{3})*(?:\.\d{2})|\d+(?:\.\d{2})?)")
 PCT_RE = re.compile(r"(\d{1,3})\s*%")
@@ -19,33 +17,22 @@ BASE = "https://www.amazon.com"
 
 
 class AmzScraper:
+    """
+    Parser + flow. Expects a fetcher with a .fetch(url, rotate_on_fail=True, referer=None) -> str.
+    For 'visible Tor' runs, pass BrowserFetcher from selenium_fetcher.py.
+    """
+
     def __init__(
         self,
+        fetcher,
         selectors: DEFAULT_SELECTORS = DEFAULT_SELECTORS,
-        use_tor: bool = False,
-        tor_ports: Tuple[int, ...] = (9150,),
-        tor_cport: int = 9151,
-        timeout: int = 30,
-        header_factory: Optional[Callable[[], Dict[str, str]]] = None,
     ):
-        if header_factory is None:
-            def _default_headers() -> Dict[str, str]:
-                hf = HeaderFactory(browser="chrome", os_name="win", include_misc=True, referer=BASE + "/")
-                return hf.generate()
-            header_factory = _default_headers
-
         self.sel = selectors
-        self.fetcher = RobustFetcher(
-            use_tor=use_tor,
-            tor_ports=tor_ports,
-            tor_cport=tor_cport,
-            timeout=timeout,
-            header_factory=header_factory,
-        )
+        self.fetcher = fetcher
 
     # Network
-    def fetch(self, url: str, rotate_ip: bool = True) -> str:
-        return self.fetcher.fetch(url, rotate_on_fail=rotate_ip)
+    def fetch(self, url: str, rotate_ip: bool = True, referer: Optional[str] = None) -> str:
+        return self.fetcher.fetch(url, rotate_on_fail=rotate_ip, referer=referer)
 
     # Soup / DOM
     @staticmethod
@@ -107,7 +94,8 @@ class AmzScraper:
     def has_related_deals(self, root: BeautifulSoup | Tag) -> bool:
         return self.query_exists(root, self.sel["product_page"]["is_more_deals_on_releated_products"])
 
-    def get_details_kv(self, root: BeautifulSoup | Tag) -> Dict[str, str]:
+    # Tech-spec tables
+    def _get_details_kv_from_tables(self, root: BeautifulSoup | Tag) -> Dict[str, str]:
         rows_sel = self.sel["product_page"]["details_table_rows"]
         th_sel = self.sel["product_page"]["details_th"]
         td_sel = self.sel["product_page"]["details_td"]
@@ -116,8 +104,40 @@ class AmzScraper:
             k = self.query_text(row, th_sel)
             v = self.query_text(row, td_sel)
             if k and v:
+                kv[k.rstrip(":").strip()] = v
+        return kv
+
+    # Detail bullets block
+    def _get_details_kv_from_bullets(self, root: BeautifulSoup | Tag) -> Dict[str, str]:
+        rows = self.sel["product_page"].get("detail_bullets_rows")
+        key_sel = self.sel["product_page"].get("detail_bullets_key")
+        val_sel = self.sel["product_page"].get("detail_bullets_val")
+        if not (rows and key_sel and val_sel):
+            return {}
+        kv: Dict[str, str] = {}
+        for li in root.select(rows):
+            k = self.query_text(li, key_sel)
+            v = self.query_text(li, val_sel)
+            if k:
+                k = k.rstrip(":").strip()
+            if k and v:
                 kv[k] = v
         return kv
+
+    def get_details_kv(self, root: BeautifulSoup | Tag) -> Dict[str, str]:
+        kv = {}
+        kv.update(self._get_details_kv_from_tables(root))
+        kv.update(self._get_details_kv_from_bullets(root))
+        return kv
+
+    @staticmethod
+    def get_dimensions_from_kv(kv: Dict[str, str]) -> Optional[str]:
+        return (
+            kv.get("Product Dimensions")
+            or kv.get("Package Dimensions")
+            or kv.get("Item Dimensions LxWxH")
+            or kv.get("Item Dimensions")
+        )
 
     # Pricing helpers
     @staticmethod
@@ -147,7 +167,7 @@ class AmzScraper:
             m = re.search(r"(\d{1,3})\s*%", coupon_text)
             if m:
                 return float(m.group(1)), "coupon"
-            amt = re.search(r"(\d+(?:\.\d{2})?)", coupon_text.replace(",", ""))
+            amt = re.search(r"(\d+(?:\.\d{2})?)", (coupon_text or "").replace(",", ""))
             if amt and price_current and price_current > 0:
                 val = float(amt.group(1))
                 return round(100.0 * val / price_current, 2), "coupon"
@@ -174,7 +194,7 @@ class AmzScraper:
         discount_percent, discount_source = self._compute_discount(
             price_current, price_original, price_fields["coupon_text"], price_fields["limited_deal_text"]
         )
-
+        details_kv = self.get_details_kv(root)
         return ProductDetails(
             name=self.get_product_name(root),
             seller_name=self.get_seller_name(root),
@@ -182,7 +202,7 @@ class AmzScraper:
             is_in_stock=self.is_in_stock(root),
             return_policy_text=self.get_return_policy(root),
             images_text=self.get_images_text(root),
-            details_kv=self.get_details_kv(root),
+            details_kv=details_kv,
             has_related_deals=self.has_related_deals(root),
             price_current=price_current,
             price_original=price_original,
@@ -227,13 +247,10 @@ class AmzScraper:
             )
         return out
 
-    # Pagination helpers
+    # Pagination
     def _next_page_url_from_root(self, root: BeautifulSoup | Tag) -> Optional[str]:
-        # If disabled span exists, we are at the last page.
-        disabled = root.select_one("span.s-pagination-item.s-pagination-next.s-pagination-disabled")
-        if disabled:
+        if root.select_one("span.s-pagination-item.s-pagination-next.s-pagination-disabled"):
             return None
-        # Otherwise look for the clickable next <a>.
         a = root.select_one("a.s-pagination-item.s-pagination-next")
         if not a:
             return None
@@ -241,42 +258,26 @@ class AmzScraper:
         return self.normalize_product_url(href)
 
     def next_page_url(self, html: str) -> Optional[str]:
-        # Public helper if you already have HTML.
         root = self.soup(html)
         return self._next_page_url_from_root(root)
 
     def crawl_search(self, start_url: str, page_limit: int = 50, rotate_ip: bool = True) -> List[SearchCard]:
-        """
-        Fetches start_url, parses cards, follows 'Next' until disabled or page_limit reached.
-        Returns all SearchCard entries across pages.
-        """
         all_cards: List[SearchCard] = []
         seen_urls: set[str] = set()
         url = start_url
         pages = 0
+        prev_url: Optional[str] = None  # not used by BrowserFetcher, kept for interface parity
 
         while url and pages < page_limit:
             if url in seen_urls:
-                break  # safety against loops
+                break
             seen_urls.add(url)
             pages += 1
 
-            # fetch with a couple retries per page
-            attempts = 0
-            last_err: Optional[Exception] = None
-            while attempts < 3:
-                attempts += 1
-                try:
-                    html = self.fetch(url, rotate_ip=rotate_ip)
-                    page_cards = self.parse_search_results(html)
-                    all_cards.extend(page_cards)
-                    nxt = self.next_page_url(html)
-                    url = nxt
-                    break
-                except Exception as e:
-                    last_err = e
-            else:
-                # exhausted attempts for this page; stop crawling
-                raise RuntimeError(f"Failed to fetch search page after retries: {last_err}")
+            html = self.fetch(url, rotate_ip=rotate_ip, referer=prev_url or BASE + "/")
+            all_cards.extend(self.parse_search_results(html))
+
+            next_url = self.next_page_url(html)
+            prev_url, url = url, next_url
 
         return all_cards
