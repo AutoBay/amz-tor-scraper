@@ -5,6 +5,7 @@ from typing import List, Optional, Dict, Any, Iterable, Tuple, Callable
 from urllib.parse import urlparse, parse_qs, unquote, urljoin
 
 from bs4 import BeautifulSoup, Tag
+import default_selectors as DEFAULT_SELECTORS
 
 from robust_fetcher import RobustFetcher
 from data_models import ProductDetails, SearchCard
@@ -20,7 +21,7 @@ BASE = "https://www.amazon.com"
 class AmzScraper:
     def __init__(
         self,
-        selectors: Any,
+        selectors: DEFAULT_SELECTORS = DEFAULT_SELECTORS,
         use_tor: bool = False,
         tor_ports: Tuple[int, ...] = (9150,),
         tor_cport: int = 9151,
@@ -225,3 +226,57 @@ class AmzScraper:
                 )
             )
         return out
+
+    # Pagination helpers
+    def _next_page_url_from_root(self, root: BeautifulSoup | Tag) -> Optional[str]:
+        # If disabled span exists, we are at the last page.
+        disabled = root.select_one("span.s-pagination-item.s-pagination-next.s-pagination-disabled")
+        if disabled:
+            return None
+        # Otherwise look for the clickable next <a>.
+        a = root.select_one("a.s-pagination-item.s-pagination-next")
+        if not a:
+            return None
+        href = a.get("href")
+        return self.normalize_product_url(href)
+
+    def next_page_url(self, html: str) -> Optional[str]:
+        # Public helper if you already have HTML.
+        root = self.soup(html)
+        return self._next_page_url_from_root(root)
+
+    def crawl_search(self, start_url: str, page_limit: int = 50, rotate_ip: bool = True) -> List[SearchCard]:
+        """
+        Fetches start_url, parses cards, follows 'Next' until disabled or page_limit reached.
+        Returns all SearchCard entries across pages.
+        """
+        all_cards: List[SearchCard] = []
+        seen_urls: set[str] = set()
+        url = start_url
+        pages = 0
+
+        while url and pages < page_limit:
+            if url in seen_urls:
+                break  # safety against loops
+            seen_urls.add(url)
+            pages += 1
+
+            # fetch with a couple retries per page
+            attempts = 0
+            last_err: Optional[Exception] = None
+            while attempts < 3:
+                attempts += 1
+                try:
+                    html = self.fetch(url, rotate_ip=rotate_ip)
+                    page_cards = self.parse_search_results(html)
+                    all_cards.extend(page_cards)
+                    nxt = self.next_page_url(html)
+                    url = nxt
+                    break
+                except Exception as e:
+                    last_err = e
+            else:
+                # exhausted attempts for this page; stop crawling
+                raise RuntimeError(f"Failed to fetch search page after retries: {last_err}")
+
+        return all_cards

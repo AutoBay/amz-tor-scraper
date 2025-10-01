@@ -4,8 +4,6 @@ import time
 import random
 from typing import List, Dict, Any
 
-import default_selectors as DEFAULT_SELECTORS
-
 from data_models import SearchCard
 from amz_scraper import AmzScraper
 from headers_factory import HeaderFactory
@@ -18,34 +16,18 @@ if __name__ == "__main__":
     hf = HeaderFactory(browser="chrome", os_name="win", include_misc=True, referer=BASE + "/")
 
     scraper = AmzScraper(
-        selectors=DEFAULT_SELECTORS,
         use_tor=False,
         header_factory=hf.generate,  # pass callable
     )
 
+    # seed search
     search_url = "https://www.amazon.com/s?k=hats&crid=3UD0HZDEGZ2PT&sprefix=ha%2Caps%2C230&ref=nb_sb_noss_2"
 
-    # 1) Get search cards (retry loop)
-    max_attempts = 50
-    attempt = 0
-    cards: List[SearchCard] = []
-    while True:
-        attempt += 1
-        try:
-            print(f"Attempt {attempt} fetching search page…")
-            search_html = scraper.fetch(search_url, rotate_ip=True)
-            cards = scraper.parse_search_results(search_html)
-            if cards:
-                print(f"Parsed {len(cards)} cards.")
-                break
-            print("No products parsed, retrying…")
-        except Exception as e:
-            print(f"Search fetch failed: {e}")
-        time.sleep(min(30, 3 * attempt))
-        if attempt >= max_attempts:
-            raise RuntimeError("Exceeded maximum retry attempts for search.")
+    # crawl all result pages up to a sane limit
+    cards: List[SearchCard] = scraper.crawl_search(search_url, page_limit=50,rotate_ip=True)
+    print(f"Collected {len(cards)} cards across pages.")
 
-    # 2) Visit each product; parse and write CSV rows
+    # visit products; parse and write CSV
     rows: List[Dict[str, Any]] = []
     for idx, c in enumerate(cards, 1):
         url = c.product_url
@@ -87,7 +69,6 @@ if __name__ == "__main__":
         rows.append(row)
         time.sleep(random.uniform(2.0, 5.0))  # polite pacing
 
-    # 3) Write CSV
     out_path = "out/products_with_discounts.csv"
     ordered = []
     for r in rows:
